@@ -15,8 +15,10 @@ import type { FleetRun } from "./fleet-tools.js";
 import { loadBotGroupDirectory } from "./group-handoff.js";
 import { formatCompactedSummary } from "./history-compaction.prompt.js";
 import { loadReplyContext } from "./reply-context.js";
+import { loadPriorRoutineReport } from "./routine-delivery.js";
 import { lateRoutineRunInstruction } from "./routine-lateness.prompt.js";
-import { routineRunInstruction } from "./routine-run.prompt.js";
+import { priorRoutineReportInstruction, routineRunInstruction } from "./routine-run.prompt.js";
+import { routineTaskInstructions } from "./routine-watch.js";
 import type {
   ComputerInstructions,
   PreparedRunComputer,
@@ -286,7 +288,8 @@ export async function buildTurnPrompt(
   } = parts.turnContext;
   const { resolved, runModelId, runModelProvider } = parts.model;
   const { attachedFilesPrompt, modelSeesImages } = parts.computer;
-  const { callEndRun, disabledBuiltinTools, ownerStartedRun, voiceCall } = parts.capabilities;
+  const { callEndRun, disabledBuiltinTools, mainRunModel, ownerStartedRun, voiceCall } =
+    parts.capabilities;
   const { approvedEffects, tools } = parts.tools;
   const { ctx } = parts;
   const pluginLine = connectedPluginsInstruction(connectedPlugins);
@@ -352,19 +355,44 @@ export async function buildTurnPrompt(
   }
   let routineNote: string | undefined;
   let lateRoutineNote: string | undefined;
+  let priorRoutineReportNote: string | undefined;
   const lateSince = current.lateSince ?? firstLateSince;
   // Daily check-ins share the routine trigger but belong to no routine.
   if (run.trigger === "routine" && run.routineId) {
-    const routine = await bestEffort(
-      "load the routine for its run's prompt",
-      deps.prisma.routine.findUnique({
-        where: { id: run.routineId },
-        select: { name: true, timezone: true },
-      }),
-    );
+    const [routine, priorReport] = await Promise.all([
+      bestEffort(
+        "load the routine for its run's prompt",
+        Promise.resolve().then(() =>
+          deps.prisma.routine?.findUnique({
+            where: { id: run.routineId! },
+            select: { name: true, timezone: true },
+          }),
+        ),
+      ),
+      bestEffort(
+        "load the routine's prior report",
+        Promise.resolve().then(() =>
+          loadPriorRoutineReport(
+            deps.prisma,
+            { routineId: run.routineId!, threadId: thread.id, currentRunId: run.id },
+            runSecrets,
+          ),
+        ),
+      ),
+    ]);
+    const routineTimezone = routine?.timezone ?? userTimeZone;
     routineNote = routineRunInstruction(routine?.name);
     if (routine && lateSince)
       lateRoutineNote = lateRoutineRunInstruction(lateSince, executionStartedAt, routine.timezone);
+    if (priorReport) {
+      priorRoutineReportNote = priorRoutineReportInstruction(priorReport, routineTimezone);
+    }
+    ctx.routineDelivery = {
+      model: mainRunModel,
+      routinePrompt: routineTaskInstructions(taskPrompt),
+      priorReport: priorReport?.text,
+      timezone: routineTimezone,
+    };
   }
   const sharedSpaceNote = people
     ? await loadSharedSpaceNote(deps.prisma, run.spaceId, run.userId)
@@ -373,6 +401,7 @@ export async function buildTurnPrompt(
     replyContext,
     routineNote,
     run.trigger === "reaction" && replyContext ? undefined : basePrompt,
+    priorRoutineReportNote,
     takeoverResume?.promptNote,
     approvalContinuation,
     // A hang-up turn is read, not heard: no spoken-reply constraint.

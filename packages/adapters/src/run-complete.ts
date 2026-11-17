@@ -22,6 +22,7 @@ import {
   shouldEnqueueCompaction,
 } from "./history-compaction.js";
 import { clearRoutineBackoff } from "./routine-backoff.js";
+import { shouldDeliverRoutineReply } from "./routine-delivery.js";
 import type { RunContext } from "./run-context.js";
 import { enqueueSteeringContinuation, renewRunLease } from "./run-lifecycle.js";
 import { redactBlocks } from "./run-messages.js";
@@ -289,7 +290,7 @@ async function finalReply(ctx: RunContext) {
     !reply.publishedTerminalSubagent &&
     reply.messageSegments.every((block) => block.kind === "text") &&
     (await groupSilenceStillAllowed(ctx));
-  const silentReply = groupSilentEnd
+  let silentReply = groupSilentEnd
     ? { assembled: "", blocks: [] }
     : ctx.allowSilentEmptyRun || ctx.groupReplyOptional
       ? stripNoResponseReply(reply.assembled, reply.messageSegments)
@@ -298,6 +299,25 @@ async function finalReply(ctx: RunContext) {
           !reply.publishedMidTurnUserMessage
         ? peerReplyWithoutSentinel(reply.assembled, reply.messageSegments)
         : stripStrayNoResponse(reply.assembled, reply.messageSegments);
+  if (
+    run.trigger === "routine" &&
+    run.routineId &&
+    ctx.routineDelivery &&
+    !ctx.scripted &&
+    (ctx.deps.routineDeliveryJudge || ctx.deps.runtime.describe().id === "pi") &&
+    !ctx.state.handedOff &&
+    !reply.publishedMidTurnUserMessage &&
+    !reply.publishedTerminalSubagent &&
+    silentReply.assembled.trim().length > 0
+  ) {
+    const decision = await shouldDeliverRoutineReply(ctx, silentReply.assembled);
+    if (!decision.deliver) {
+      silentReply = {
+        assembled: "",
+        blocks: silentReply.blocks.filter((block) => block.kind !== "text"),
+      };
+    }
+  }
   let completionBlocks = silentReply.blocks;
   if (!silentReply.assembled || isBackgroundRunTrigger(run.trigger)) {
     // Mid-turn progress already posted durable chat messages; skip the empty

@@ -1,5 +1,6 @@
 import type {
   AdapterContext,
+  AgentRunModel,
   AgentToolCompletion,
   BrowserProvider,
   ComputerRef,
@@ -338,6 +339,13 @@ export interface RunContext {
   emptyResponseText: string | undefined;
   /** Messages mode keeps working text on the steps; only message_user and the final answer reach chat. */
   replyMode: ReplyMode;
+  /** Context for the second-stage routine delivery gate when a scheduled routine finishes with prose. */
+  routineDelivery?: {
+    model: AgentRunModel;
+    routinePrompt: string;
+    priorReport?: string;
+    timezone?: string | null;
+  };
   state: RunState;
   settleRunningHelpers: () => Promise<void>;
   stopHeartbeatAfterCompletion: () => void;

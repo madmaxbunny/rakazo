@@ -15,6 +15,7 @@ import type * as ComputerLifecycleModule from "./computer-lifecycle.js";
 import { createRunExecutor } from "./executor.js";
 import { createJobReconciler } from "./job-reconciler.js";
 import type * as ModelVisionModule from "./model-vision.js";
+import type { RoutineDeliveryJudge } from "./routine-delivery.js";
 import type * as RunNotificationsModule from "./run-notifications.js";
 import { notifyRun } from "./run-notifications.js";
 import {
@@ -92,6 +93,9 @@ async function runTurn(
     directChat?: boolean;
     /** The peer message answers a request this bot sent, so the user reads the reply. */
     repliesToRequest?: boolean;
+    routineId?: string;
+    priorRoutineReport?: string;
+    routineDeliveryJudge?: RoutineDeliveryJudge;
   } = {},
 ) {
   vi.mocked(loadBotMessageContext).mockResolvedValue({
@@ -112,6 +116,7 @@ async function runTurn(
     userId: "user-1",
     status: "queued",
     trigger: options.trigger ?? (silent ? "bot_message" : "user"),
+    routineId: options.routineId ?? null,
     sourceMessageId: "source-1",
     leaseFence: 0,
     groupReplyOptional: options.group?.optional ?? false,
@@ -162,9 +167,14 @@ async function runTurn(
     space: { findUnique: vi.fn(async () => null) },
     spaceMember: { findUnique: vi.fn(async () => ({ id: "member-1" })) },
     user: { findUnique: vi.fn(async () => null) },
+    routine: {
+      findUnique: vi.fn(async () => ({ name: "Chat monitor", timezone: "UTC" })),
+      count: vi.fn(async () => 0),
+    },
     run: {
       findUnique: vi.fn(async () => run),
       findUniqueOrThrow: vi.fn(async () => run),
+      findMany: vi.fn(async () => (options.priorRoutineReport ? [{ id: "prior-run-1" }] : [])),
       updateMany: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
         Object.assign(run, data);
         return { count: 1 };
@@ -236,29 +246,41 @@ async function runTurn(
         messages.push(data);
         return { ...data, id: `message-${messages.length}` };
       }),
-      findMany: vi.fn(async ({ where }: { where: { runId?: string } }) =>
-        !where.runId && options.history
-          ? options.history.toReversed().map((message) => ({
-              ...message,
-              threadId: run.threadId,
-              botId: message.role === "bot" ? run.botId : null,
-              runId: null,
-              blocks: [{ kind: "text", text: message.text }],
-              createdAt: new Date("2026-10-24T08:00:00.000Z"),
-              replyToMessageId: null,
-              replyQuote: null,
-              replyTo: null,
-              clientNonce: message.clientNonce ?? null,
-              steeringMessages: [],
-            }))
-          : where.runId === run.id && options.priorProgressText
-            ? [
-                {
-                  blocks: [{ kind: "text", text: options.priorProgressText }],
-                  clientNonce: userProgressClientNonce(run.id),
-                },
-              ]
-            : [],
+      findMany: vi.fn(async ({ where }: { where: { runId?: string | { in?: string[] } } }) =>
+        typeof where.runId === "object" &&
+        where.runId &&
+        "in" in where.runId &&
+        options.priorRoutineReport
+          ? [
+              {
+                id: "prior-report-1",
+                blocks: [{ kind: "text", text: options.priorRoutineReport }],
+                createdAt: new Date("2026-11-16T12:00:00.000Z"),
+                clientNonce: null,
+              },
+            ]
+          : !where.runId && options.history
+            ? options.history.toReversed().map((message) => ({
+                ...message,
+                threadId: run.threadId,
+                botId: message.role === "bot" ? run.botId : null,
+                runId: null,
+                blocks: [{ kind: "text", text: message.text }],
+                createdAt: new Date("2026-10-24T08:00:00.000Z"),
+                replyToMessageId: null,
+                replyQuote: null,
+                replyTo: null,
+                clientNonce: message.clientNonce ?? null,
+                steeringMessages: [],
+              }))
+            : where.runId === run.id && options.priorProgressText
+              ? [
+                  {
+                    blocks: [{ kind: "text", text: options.priorProgressText }],
+                    clientNonce: userProgressClientNonce(run.id),
+                  },
+                ]
+              : [],
       ),
       findUnique: vi.fn(async () =>
         run.trigger === "messaging" && !options.directChat
@@ -368,6 +390,7 @@ async function runTurn(
     jobs,
     messagingDelivery,
     secrets,
+    routineDeliveryJudge: options.routineDeliveryJudge,
     ...(options.graphical
       ? {
           browser: {
@@ -2258,6 +2281,75 @@ describe("monitor-only group handoffs", () => {
         outcome: "completed",
         markUnread: true,
         blocks: [{ kind: "text", text: "The interview overlaps your dentist appointment." }],
+      }),
+    );
+  });
+});
+
+describe("two-stage routine delivery gate", () => {
+  it("injects the prior routine report and suppresses a no-news reply after tool calls", async () => {
+    const routineDeliveryJudge = vi.fn<RoutineDeliveryJudge>(async () => ({
+      deliver: false,
+      reason: "No new company news was found.",
+    }));
+    const result = await runTurn(
+      "Checked recent messages: no new company news was found.",
+      true,
+      "Checking chat messages.",
+      [],
+      "fyi",
+      {
+        trigger: "routine",
+        routineId: "routine-1",
+        priorRoutineReport: "1. Weekly meeting agenda feedback",
+        routineDeliveryJudge,
+      },
+    );
+    const [firstCall] = result.runtimeRun.mock.calls[0]!;
+    expect(firstCall.prompt).toContain("<prior_routine_report>");
+    expect(firstCall.prompt).toContain("1. Weekly meeting agenda feedback");
+    expect(routineDeliveryJudge).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        routinePrompt: "Look again",
+        priorReport: "1. Weekly meeting agenda feedback",
+        candidateReply: "Checked recent messages: no new company news was found.",
+      }),
+    );
+    expect(result.finalizeRun).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        outcome: "completed",
+        blocks: [],
+        markUnread: false,
+      }),
+    );
+  });
+
+  it("delivers the routine reply when the second-stage judge approves it", async () => {
+    const routineDeliveryJudge = vi.fn<RoutineDeliveryJudge>(async () => ({
+      deliver: true,
+      reason: "Contains new company announcement.",
+    }));
+    const result = await runTurn(
+      "New announcement: Q4 town hall scheduled for Friday.",
+      true,
+      "Checking chat messages.",
+      [],
+      "fyi",
+      {
+        trigger: "routine",
+        routineId: "routine-1",
+        priorRoutineReport: "1. Weekly meeting agenda feedback",
+        routineDeliveryJudge,
+      },
+    );
+    expect(routineDeliveryJudge).toHaveBeenCalledOnce();
+    expect(result.finalizeRun).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        outcome: "completed",
+        markUnread: true,
+        blocks: expect.arrayContaining([
+          { kind: "text", text: "New announcement: Q4 town hall scheduled for Friday." },
+        ]),
       }),
     );
   });

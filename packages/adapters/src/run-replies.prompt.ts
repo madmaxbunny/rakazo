@@ -15,7 +15,7 @@ export function messagesModeReplyGuidance(maxLength = messageUserMaxLength()): s
   return `Text you write while working is private and never shown to the person. To tell them anything before your final answer, such as what you are starting on, something important you found, or a question, call message_user with one or two short sentences (at most ${maxLength} characters). Your final answer, the text you write after your last tool call, is shown. Put the complete answer there, never in message_user.`;
 }
 
-export const ROUTINE_SILENT_REPLY_GUIDANCE = `If this routine's prompt says to stay silent when there is nothing to report, the entire final assistant reply must be exactly ${NO_RESPONSE} — no surrounding prose, no variants, no progress updates, no all-clear, and no meta note that you are staying silent. Do not call message_user unless you have something to report.`;
+export const ROUTINE_SILENT_REPLY_GUIDANCE = `If this routine's prompt says to stay silent when there is nothing to report, or asks to report only when something new or matching is found and nothing qualifies (or everything matching was already covered in this routine's prior report), the entire final assistant reply must be exactly ${NO_RESPONSE} — no surrounding prose, no variants, no progress updates, no all-clear, and no meta note that you are staying silent. Do not call message_user unless you have something to report.`;
 
 export const REACTION_SILENT_REPLY_GUIDANCE = `The user reacted with an emoji to your message. Reply only if the reaction calls for it, such as a correction after 👎, a go-ahead on something you proposed, or a question. Otherwise the entire final assistant reply must be exactly ${NO_RESPONSE}, with no message_user call.`;
 
